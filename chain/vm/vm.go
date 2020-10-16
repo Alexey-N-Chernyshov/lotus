@@ -358,7 +358,7 @@ func (vm *VM) ApplyImplicitMessage(ctx context.Context, msg *types.Message) (*Ap
 	rt.finilizeGasTracing()
 
 	if !aerrors.IsFatal(actorErr) {
-		dvm.OnReceipt(aerrors.RetCode(actorErr), rt.gasUsed, ret)
+		dvm.OnReceipt(aerrors.RetCode(actorErr), 0, ret)
 	}
 
 	return &ApplyRet{
