@@ -124,6 +124,14 @@ func (rt *Runtime) StoreGet(c cid.Cid, o cbor.Unmarshaler) bool {
 }
 
 func (rt *Runtime) StorePut(x cbor.Marshaler) cid.Cid {
+	c := rt.StorePutWithoutLogs(x)
+	buf := new(bytes.Buffer)
+	_ = x.MarshalCBOR(buf)
+	dvm.OnIpldSet(&c, buf.Bytes())
+	return c
+}
+
+func (rt *Runtime) StorePutWithoutLogs(x cbor.Marshaler) cid.Cid {
 	c, err := rt.cst.Put(context.TODO(), x)
 	if err != nil {
 		if xerrors.As(err, new(ipldcbor.SerializationError)) {
@@ -360,7 +368,7 @@ func (rt *Runtime) Send(to address.Address, method abi.MethodNum, m cbor.Marshal
 		return err.RetCode()
 	}
 	_ = rt.chargeGasSafe(gasOnActorExec)
-	
+
 	dvm.OnReceipt(aerrors.RetCode(err), rt.gasUsed, ret)
 
 	if err := out.UnmarshalCBOR(bytes.NewReader(ret)); err != nil {
@@ -411,7 +419,7 @@ func (rt *Runtime) internalSend(from, to address.Address, method abi.MethodNum, 
 }
 
 func (rt *Runtime) StateCreate(obj cbor.Marshaler) {
-	c := rt.StorePut(obj)
+	c := rt.StorePutWithoutLogs(obj)
 	err := rt.stateCommit(EmptyObjectCid, c)
 	if err != nil {
 		panic(fmt.Errorf("failed to commit state after creating object: %w", err))
@@ -442,7 +450,7 @@ func (rt *Runtime) StateTransaction(obj cbor.Er, f func()) {
 	f()
 	rt.allowInternal = true
 
-	c := rt.StorePut(obj)
+	c := rt.StorePutWithoutLogs(obj)
 
 	err = rt.stateCommit(baseState, c)
 	if err != nil {

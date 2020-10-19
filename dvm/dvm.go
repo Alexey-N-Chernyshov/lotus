@@ -68,6 +68,10 @@ func Logf(f string, a ...interface{}) {
 	}
 }
 
+func OnIpldSet(c *cid.Cid, b []byte) {
+	Logf("IPLD PUT: %s %s", DumpCid(c), DumpCbor(b))
+}
+
 func OnCharge(gas int64) {
 	if gas != 0 {
 		Logf("CHARGE %d", gas)
@@ -88,11 +92,14 @@ func OnReceipt(exit exitcode.ExitCode, gas int64, ret []byte) {
 	Logf("RECEIPT c=%d g=%d %s", exit, gas, DumpCbor(ret))
 }
 
-func OnActor(store cbornode.IpldStore, addr *address.Address, nh *cid.Cid, nn uint64, nb *big.Int, fo func() (*cid.Cid, uint64, *big.Int, bool)) {
+func OnActor(store cbornode.IpldStore, addr *address.Address, code *cid.Cid, nh *cid.Cid, nn uint64, nb *big.Int, fo func() (*cid.Cid, uint64, *big.Int, bool)) {
 	if Logger != nil && Logging {
 		if oh, on, ob, ok := fo(); ok {
 			if _h, _n, _b := !oh.Equals(*nh), on != nn, !ob.Equals(*nb); _b || _n || _h {
-				Logf("ACTOR %s", Addr(addr))
+				code_multihash, e := multihash.Decode(code.Hash())
+				Epanic(e)
+
+				Logf("ACTOR %s %s", Addr(addr), string(code_multihash.Digest))
 				defer UnIndent(Indent())
 				if _b {
 					Logf("balance %s -> %s", ob, nb)

@@ -205,7 +205,7 @@ func LoadStateTree(cst cbor.IpldStore, c cid.Cid) (*StateTree, error) {
 }
 
 func (st *StateTree) SetActor(addr address.Address, act *types.Actor) error {
-	dvm.OnActor(st.Store, &addr, &act.Head, act.Nonce, &act.Balance, func() (*cid.Cid, uint64, *big.Int, bool) {
+	dvm.OnActor(st.Store, &addr, &act.Code, &act.Head, act.Nonce, &act.Balance, func() (*cid.Cid, uint64, *big.Int, bool) {
 		if a, e := st.GetActor(addr); e == nil {
 			return &a.Head, a.Nonce, &a.Balance, true
 		}
