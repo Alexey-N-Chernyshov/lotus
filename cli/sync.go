@@ -45,8 +45,8 @@ var syncStatusCmd = &cli.Command{
 		}
 
 		fmt.Println("sync status:")
-		for i, ss := range state.ActiveSyncs {
-			fmt.Printf("worker %d:\n", i)
+		for _, ss := range state.ActiveSyncs {
+			fmt.Printf("worker %d:\n", ss.WorkerID)
 			var base, target []cid.Cid
 			var heightDiff int64
 			var theight abi.ChainEpoch
@@ -84,6 +84,12 @@ var syncStatusCmd = &cli.Command{
 var syncWaitCmd = &cli.Command{
 	Name:  "wait",
 	Usage: "Wait for sync to be complete",
+	Flags: []cli.Flag{
+		&cli.BoolFlag{
+			Name:  "watch",
+			Usage: "don't exit after node is synced",
+		},
+	},
 	Action: func(cctx *cli.Context) error {
 		napi, closer, err := GetFullNodeAPI(cctx)
 		if err != nil {
@@ -92,7 +98,7 @@ var syncWaitCmd = &cli.Command{
 		defer closer()
 		ctx := ReqContext(cctx)
 
-		return SyncWait(ctx, napi)
+		return SyncWait(ctx, napi, cctx.Bool("watch"))
 	},
 }
 
@@ -234,7 +240,7 @@ var syncCheckpointCmd = &cli.Command{
 	},
 }
 
-func SyncWait(ctx context.Context, napi api.FullNode) error {
+func SyncWait(ctx context.Context, napi api.FullNode, watch bool) error {
 	tick := time.Second / 4
 
 	lastLines := 0
@@ -257,12 +263,17 @@ func SyncWait(ctx context.Context, napi api.FullNode) error {
 			return err
 		}
 
+		if len(state.ActiveSyncs) == 0 {
+			time.Sleep(time.Second)
+			continue
+		}
+
 		head, err := napi.ChainHead(ctx)
 		if err != nil {
 			return err
 		}
 
-		working := 0
+		working := -1
 		for i, ss := range state.ActiveSyncs {
 			switch ss.Stage {
 			case api.StageSyncComplete:
@@ -273,7 +284,12 @@ func SyncWait(ctx context.Context, napi api.FullNode) error {
 			}
 		}
 
+		if working == -1 {
+			working = len(state.ActiveSyncs) - 1
+		}
+
 		ss := state.ActiveSyncs[working]
+		workerID := ss.WorkerID
 
 		var baseHeight abi.ChainEpoch
 		var target []cid.Cid
@@ -296,7 +312,7 @@ func SyncWait(ctx context.Context, napi api.FullNode) error {
 			fmt.Print("\r\x1b[2K\x1b[A")
 		}
 
-		fmt.Printf("Worker: %d; Base: %d; Target: %d (diff: %d)\n", working, baseHeight, theight, heightDiff)
+		fmt.Printf("Worker: %d; Base: %d; Target: %d (diff: %d)\n", workerID, baseHeight, theight, heightDiff)
 		fmt.Printf("State: %s; Current Epoch: %d; Todo: %d\n", ss.Stage, ss.Height, theight-ss.Height)
 		lastLines = 2
 
@@ -311,7 +327,7 @@ func SyncWait(ctx context.Context, napi api.FullNode) error {
 
 		_ = target // todo: maybe print? (creates a bunch of line wrapping issues with most tipsets)
 
-		if time.Now().Unix()-int64(head.MinTimestamp()) < int64(build.BlockDelaySecs) {
+		if !watch && time.Now().Unix()-int64(head.MinTimestamp()) < int64(build.BlockDelaySecs) {
 			fmt.Println("\nDone!")
 			return nil
 		}

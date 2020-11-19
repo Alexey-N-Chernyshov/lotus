@@ -3,9 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"strconv"
 
+	"github.com/filecoin-project/lotus/chain/gen/genesis"
+
+	_init "github.com/filecoin-project/lotus/chain/actors/builtin/init"
+
 	"github.com/docker/go-units"
+
 	"github.com/filecoin-project/lotus/chain/actors/builtin"
 	"github.com/filecoin-project/lotus/chain/actors/builtin/multisig"
 	"github.com/filecoin-project/lotus/chain/actors/builtin/power"
@@ -20,6 +26,7 @@ import (
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
+
 	"github.com/filecoin-project/lotus/chain/actors/adt"
 	"github.com/filecoin-project/lotus/chain/actors/builtin/miner"
 	"github.com/filecoin-project/lotus/chain/state"
@@ -29,7 +36,6 @@ import (
 	"github.com/filecoin-project/lotus/chain/vm"
 	lcli "github.com/filecoin-project/lotus/cli"
 	"github.com/filecoin-project/lotus/extern/sector-storage/ffiwrapper"
-	"github.com/filecoin-project/lotus/lib/blockstore"
 	"github.com/filecoin-project/lotus/node/repo"
 )
 
@@ -136,6 +142,9 @@ var chainBalanceStateCmd = &cli.Command{
 		&cli.BoolFlag{
 			Name: "miner-info",
 		},
+		&cli.BoolFlag{
+			Name: "robust-addresses",
+		},
 	},
 	Action: func(cctx *cli.Context) error {
 		ctx := context.TODO()
@@ -161,19 +170,26 @@ var chainBalanceStateCmd = &cli.Command{
 
 		defer lkrepo.Close() //nolint:errcheck
 
-		ds, err := lkrepo.Datastore("/chain")
+		bs, err := lkrepo.Blockstore(repo.BlockstoreChain)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to open blockstore: %w", err)
 		}
+
+		defer func() {
+			if c, ok := bs.(io.Closer); ok {
+				if err := c.Close(); err != nil {
+					log.Warnf("failed to close blockstore: %s", err)
+				}
+			}
+		}()
 
 		mds, err := lkrepo.Datastore("/metadata")
 		if err != nil {
 			return err
 		}
 
-		bs := blockstore.NewBlockstore(ds)
-
-		cs := store.NewChainStore(bs, mds, vm.Syscalls(ffiwrapper.ProofVerifier), nil)
+		cs := store.NewChainStore(bs, bs, mds, vm.Syscalls(ffiwrapper.ProofVerifier), nil)
+		defer cs.Close() //nolint:errcheck
 
 		cst := cbor.NewCborStore(bs)
 		store := adt.WrapStore(ctx, cst)
@@ -187,6 +203,33 @@ var chainBalanceStateCmd = &cli.Command{
 
 		minerInfo := cctx.Bool("miner-info")
 
+		robustMap := make(map[address.Address]address.Address)
+		if cctx.Bool("robust-addresses") {
+			iact, err := tree.GetActor(_init.Address)
+			if err != nil {
+				return xerrors.Errorf("failed to load init actor: %w", err)
+			}
+
+			ist, err := _init.Load(store, iact)
+			if err != nil {
+				return xerrors.Errorf("failed to load init actor state: %w", err)
+			}
+
+			err = ist.ForEachActor(func(id abi.ActorID, addr address.Address) error {
+				idAddr, err := address.NewIDAddress(uint64(id))
+				if err != nil {
+					return xerrors.Errorf("failed to write to addr map: %w", err)
+				}
+
+				robustMap[idAddr] = addr
+
+				return nil
+			})
+			if err != nil {
+				return xerrors.Errorf("failed to invert init address map: %w", err)
+			}
+		}
+
 		var infos []accountInfo
 		err = tree.ForEach(func(addr address.Address, act *types.Actor) error {
 
@@ -199,6 +242,23 @@ var chainBalanceStateCmd = &cli.Command{
 				InitialPledge: types.FIL(big.NewInt(0)),
 				PreCommits:    types.FIL(big.NewInt(0)),
 				VestingAmount: types.FIL(big.NewInt(0)),
+			}
+
+			if cctx.Bool("robust-addresses") {
+				robust, found := robustMap[addr]
+				if found {
+					ai.Address = robust
+				} else {
+					id, err := address.IDFromAddress(addr)
+					if err != nil {
+						return xerrors.Errorf("failed to get ID address: %w", err)
+					}
+
+					// TODO: This is not the correctest way to determine whether a robust address should exist
+					if id >= genesis.MinerStart {
+						return xerrors.Errorf("address doesn't have a robust address: %s", addr)
+					}
+				}
 			}
 
 			if minerInfo && builtin.IsStorageMinerActor(act.Code) {
@@ -331,19 +391,26 @@ var chainPledgeCmd = &cli.Command{
 
 		defer lkrepo.Close() //nolint:errcheck
 
-		ds, err := lkrepo.Datastore("/chain")
+		bs, err := lkrepo.Blockstore(repo.BlockstoreChain)
 		if err != nil {
-			return err
+			return xerrors.Errorf("failed to open blockstore: %w", err)
 		}
+
+		defer func() {
+			if c, ok := bs.(io.Closer); ok {
+				if err := c.Close(); err != nil {
+					log.Warnf("failed to close blockstore: %s", err)
+				}
+			}
+		}()
 
 		mds, err := lkrepo.Datastore("/metadata")
 		if err != nil {
 			return err
 		}
 
-		bs := blockstore.NewBlockstore(ds)
-
-		cs := store.NewChainStore(bs, mds, vm.Syscalls(ffiwrapper.ProofVerifier), nil)
+		cs := store.NewChainStore(bs, bs, mds, vm.Syscalls(ffiwrapper.ProofVerifier), nil)
+		defer cs.Close() //nolint:errcheck
 
 		cst := cbor.NewCborStore(bs)
 		store := adt.WrapStore(ctx, cst)
@@ -372,7 +439,7 @@ var chainPledgeCmd = &cli.Command{
 			pledgeCollateral = c
 		}
 
-		circ, err := sm.GetCirculatingSupplyDetailed(ctx, abi.ChainEpoch(epoch), state)
+		circ, err := sm.GetVMCirculatingSupplyDetailed(ctx, abi.ChainEpoch(epoch), state)
 		if err != nil {
 			return err
 		}

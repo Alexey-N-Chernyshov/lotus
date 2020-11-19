@@ -54,8 +54,8 @@ func (m *Message) ValueReceived() abi.TokenAmount {
 var EnableGasTracing = false
 
 type Runtime struct {
-	rt0.Message
-	rt0.Syscalls
+	rt2.Message
+	rt2.Syscalls
 
 	ctx context.Context
 
@@ -73,6 +73,7 @@ type Runtime struct {
 	originNonce uint64
 
 	executionTrace    types.ExecutionTrace
+	depth             uint64
 	numActorsCreated  uint64
 	allowInternal     bool
 	callerValidated   bool
@@ -554,9 +555,10 @@ func (rt *Runtime) chargeGasInternal(gas GasCharge, skip int) aerrors.ActorError
 
 	// overflow safe
 	if rt.gasUsed > rt.gasAvailable-toUse {
+		gasUsed := rt.gasUsed
 		rt.gasUsed = rt.gasAvailable
-		return aerrors.Newf(exitcode.SysErrOutOfGas, "not enough gas: used=%d, available=%d",
-			rt.gasUsed, rt.gasAvailable)
+		return aerrors.Newf(exitcode.SysErrOutOfGas, "not enough gas: used=%d, available=%d, use=%d",
+			gasUsed, rt.gasAvailable, toUse)
 	}
 	rt.gasUsed += toUse
 	return nil

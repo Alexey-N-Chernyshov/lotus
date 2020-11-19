@@ -3,7 +3,10 @@ package node
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
+
+	metricsi "github.com/ipfs/go-metrics-interface"
 
 	"github.com/filecoin-project/lotus/chain"
 	"github.com/filecoin-project/lotus/chain/exchange"
@@ -44,13 +47,14 @@ import (
 	"github.com/filecoin-project/lotus/chain/metrics"
 	"github.com/filecoin-project/lotus/chain/stmgr"
 	"github.com/filecoin-project/lotus/chain/types"
+	ledgerwallet "github.com/filecoin-project/lotus/chain/wallet/ledger"
 	"github.com/filecoin-project/lotus/chain/wallet/remotewallet"
 	sectorstorage "github.com/filecoin-project/lotus/extern/sector-storage"
 	"github.com/filecoin-project/lotus/extern/sector-storage/ffiwrapper"
 	"github.com/filecoin-project/lotus/extern/sector-storage/stores"
+	"github.com/filecoin-project/lotus/extern/sector-storage/storiface"
 	sealing "github.com/filecoin-project/lotus/extern/storage-sealing"
 	"github.com/filecoin-project/lotus/journal"
-	"github.com/filecoin-project/lotus/lib/blockstore"
 	"github.com/filecoin-project/lotus/lib/peermgr"
 	_ "github.com/filecoin-project/lotus/lib/sigs/bls"
 	_ "github.com/filecoin-project/lotus/lib/sigs/secp"
@@ -120,11 +124,12 @@ const (
 
 	HandleIncomingBlocksKey
 	HandleIncomingMessagesKey
-
+	HandleMigrateClientFundsKey
 	HandlePaymentChannelManagerKey
 
 	// miner
 	GetParamsKey
+	HandleMigrateProviderFundsKey
 	HandleDealsKey
 	HandleRetrievalKey
 	RunSectorServiceKey
@@ -134,6 +139,7 @@ const (
 	HeadMetricsKey
 	SettlePaymentChannelsKey
 	RunPeerTaggerKey
+	SetupFallbackBlockstoreKey
 
 	SetApiEndpointKey
 
@@ -165,7 +171,10 @@ func defaults() []Option {
 		Override(new(journal.DisabledEvents), journal.EnvDisabledEvents),
 		Override(new(journal.Journal), modules.OpenFilesystemJournal),
 
-		Override(new(helpers.MetricsCtx), context.Background),
+		Override(new(helpers.MetricsCtx), func() context.Context {
+			return metricsi.CtxScope(context.Background(), "lotus")
+		}),
+
 		Override(new(record.Validator), modules.RecordValidator),
 		Override(new(dtypes.Bootstrapper), dtypes.Bootstrapper(false)),
 		Override(new(dtypes.ShutdownChan), make(chan struct{})),
@@ -249,14 +258,11 @@ func Online() Option {
 			Override(new(*store.ChainStore), modules.ChainStore),
 			Override(new(stmgr.UpgradeSchedule), stmgr.DefaultUpgradeSchedule()),
 			Override(new(*stmgr.StateManager), stmgr.NewStateManagerWithUpgradeSchedule),
-			Override(new(stmgr.StateManagerAPI), From(new(*stmgr.StateManager))),
 			Override(new(*wallet.LocalWallet), wallet.NewWallet),
-			Override(new(api.WalletAPI), From(new(*wallet.LocalWallet))),
 			Override(new(wallet.Default), From(new(*wallet.LocalWallet))),
+			Override(new(api.WalletAPI), From(new(wallet.MultiWallet))),
 			Override(new(*messagesigner.MessageSigner), messagesigner.NewMessageSigner),
 
-			Override(new(dtypes.ChainGCLocker), blockstore.NewGCLocker),
-			Override(new(dtypes.ChainGCBlockstore), modules.ChainGCBlockstore),
 			Override(new(dtypes.ChainBitswap), modules.ChainBitswap),
 			Override(new(dtypes.ChainBlockService), modules.ChainBlockService),
 
@@ -267,6 +273,7 @@ func Online() Option {
 			Override(new(*chain.Syncer), modules.NewSyncer),
 			Override(new(exchange.Client), exchange.NewClient),
 			Override(new(*messagepool.MessagePool), modules.MessagePool),
+			Override(new(dtypes.DefaultMaxFeeFunc), modules.NewDefaultMaxFeeFunc),
 
 			Override(new(modules.Genesis), modules.ErrorGenesis),
 			Override(new(dtypes.AfterGenesisSet), modules.SetGenesis),
@@ -285,14 +292,14 @@ func Online() Option {
 			Override(new(retrievalmarket.RetrievalClient), modules.RetrievalClient),
 			Override(new(dtypes.ClientDatastore), modules.NewClientDatastore),
 			Override(new(dtypes.ClientDataTransfer), modules.NewClientGraphsyncDataTransfer),
-			Override(new(modules.ClientDealFunds), modules.NewClientDealFunds),
 			Override(new(storagemarket.StorageClient), modules.StorageClient),
 			Override(new(storagemarket.StorageClientNode), storageadapter.NewClientNodeAdapter),
 			Override(new(beacon.Schedule), modules.RandomSchedule),
 
 			Override(new(*paychmgr.Store), paychmgr.NewStore),
 			Override(new(*paychmgr.Manager), paychmgr.NewManager),
-			Override(new(*market.FundMgr), market.StartFundManager),
+			Override(new(*market.FundManager), market.NewFundManager),
+			Override(HandleMigrateClientFundsKey, modules.HandleMigrateClientFunds),
 			Override(HandlePaymentChannelManagerKey, paychmgr.HandleManager),
 			Override(SettlePaymentChannelsKey, settler.SettlePaymentChannels),
 		),
@@ -340,6 +347,7 @@ func Online() Option {
 
 			Override(new(sectorstorage.SectorManager), From(new(*sectorstorage.Manager))),
 			Override(new(storage2.Prover), From(new(sectorstorage.SectorManager))),
+			Override(new(storiface.WorkerReturn), From(new(sectorstorage.SectorManager))),
 
 			Override(new(*sectorblocks.SectorBlocks), sectorblocks.NewSectorBlocks),
 			Override(new(*storage.Miner), modules.StorageMiner(config.DefaultStorageMiner().Fees)),
@@ -353,10 +361,11 @@ func Online() Option {
 			Override(new(dtypes.ProviderDataTransfer), modules.NewProviderDAGServiceDataTransfer),
 			Override(new(dtypes.ProviderPieceStore), modules.NewProviderPieceStore),
 			Override(new(*storedask.StoredAsk), modules.NewStorageAsk),
-			Override(new(dtypes.DealFilter), modules.BasicDealFilter(nil)),
-			Override(new(modules.ProviderDealFunds), modules.NewProviderDealFunds),
+			Override(new(dtypes.StorageDealFilter), modules.BasicDealFilter(nil)),
+			Override(new(dtypes.RetrievalDealFilter), modules.RetrievalDealFilter(nil)),
 			Override(new(storagemarket.StorageProvider), modules.StorageProvider),
 			Override(new(storagemarket.StorageProviderNode), storageadapter.NewProviderNodeAdapter(nil)),
+			Override(HandleMigrateProviderFundsKey, modules.HandleMigrateProviderFunds),
 			Override(HandleRetrievalKey, modules.HandleRetrieval),
 			Override(GetParamsKey, modules.GetParams),
 			Override(HandleDealsKey, modules.HandleDeals),
@@ -451,7 +460,7 @@ func ConfigFullNode(c interface{}) Option {
 	return Options(
 		ConfigCommon(&cfg.Common),
 		If(cfg.Client.UseIpfs,
-			Override(new(dtypes.ClientBlockstore), modules.IpfsClientBlockstore(ipfsMaddr)),
+			Override(new(dtypes.ClientBlockstore), modules.IpfsClientBlockstore(ipfsMaddr, cfg.Client.IpfsOnlineMode)),
 			If(cfg.Client.IpfsUseForRetrieval,
 				Override(new(dtypes.ClientRetrievalStoreManager), modules.ClientBlockstoreRetrievalStoreManager),
 			),
@@ -459,8 +468,16 @@ func ConfigFullNode(c interface{}) Option {
 		If(cfg.Metrics.HeadNotifs,
 			Override(HeadMetricsKey, metrics.SendHeadNotifs(cfg.Metrics.Nickname)),
 		),
+
 		If(cfg.Wallet.RemoteBackend != "",
-			Override(new(api.WalletAPI), remotewallet.SetupRemoteWallet(cfg.Wallet.RemoteBackend)),
+			Override(new(*remotewallet.RemoteWallet), remotewallet.SetupRemoteWallet(cfg.Wallet.RemoteBackend)),
+		),
+		If(cfg.Wallet.EnableLedger,
+			Override(new(*ledgerwallet.LedgerWallet), ledgerwallet.NewWallet),
+		),
+		If(cfg.Wallet.DisableLocal,
+			Unset(new(*wallet.LocalWallet)),
+			Override(new(wallet.Default), wallet.NilDefault),
 		),
 	)
 }
@@ -475,7 +492,11 @@ func ConfigStorageMiner(c interface{}) Option {
 		ConfigCommon(&cfg.Common),
 
 		If(cfg.Dealmaking.Filter != "",
-			Override(new(dtypes.DealFilter), modules.BasicDealFilter(dealfilter.CliDealFilter(cfg.Dealmaking.Filter))),
+			Override(new(dtypes.StorageDealFilter), modules.BasicDealFilter(dealfilter.CliStorageDealFilter(cfg.Dealmaking.Filter))),
+		),
+
+		If(cfg.Dealmaking.RetrievalFilter != "",
+			Override(new(dtypes.RetrievalDealFilter), modules.RetrievalDealFilter(dealfilter.CliRetrievalDealFilter(cfg.Dealmaking.RetrievalFilter))),
 		),
 
 		Override(new(storagemarket.StorageProviderNode), storageadapter.NewProviderNodeAdapter(&cfg.Fees)),
@@ -500,7 +521,13 @@ func Repo(r repo.Repo) Option {
 			Override(new(repo.LockedRepo), modules.LockedRepo(lr)), // module handles closing
 
 			Override(new(dtypes.MetadataDS), modules.Datastore),
-			Override(new(dtypes.ChainBlockstore), modules.ChainBlockstore),
+			Override(new(dtypes.ChainRawBlockstore), modules.ChainRawBlockstore),
+			Override(new(dtypes.ChainBlockstore), From(new(dtypes.ChainRawBlockstore))),
+
+			If(os.Getenv("LOTUS_ENABLE_CHAINSTORE_FALLBACK") == "1",
+				Override(new(dtypes.ChainBlockstore), modules.FallbackChainBlockstore),
+				Override(SetupFallbackBlockstoreKey, modules.SetupFallbackBlockstore),
+			),
 
 			Override(new(dtypes.ClientImportMgr), modules.ClientImportMgr),
 			Override(new(dtypes.ClientMultiDstore), modules.ClientMultiDatastore),

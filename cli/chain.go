@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -53,6 +55,7 @@ var chainCmd = &cli.Command{
 		slashConsensusFault,
 		chainGasPriceCmd,
 		chainInspectUsage,
+		chainDecodeCmd,
 	},
 }
 
@@ -1230,6 +1233,86 @@ var chainGasPriceCmd = &cli.Command{
 
 			fmt.Printf("%d blocks: %s (%s)\n", nblocks, est, types.FIL(est))
 		}
+
+		return nil
+	},
+}
+
+var chainDecodeCmd = &cli.Command{
+	Name:  "decode",
+	Usage: "decode various types",
+	Subcommands: []*cli.Command{
+		chainDecodeParamsCmd,
+	},
+}
+
+var chainDecodeParamsCmd = &cli.Command{
+	Name:      "params",
+	Usage:     "Decode message params",
+	ArgsUsage: "[toAddr method params]",
+	Flags: []cli.Flag{
+		&cli.StringFlag{
+			Name: "tipset",
+		},
+		&cli.StringFlag{
+			Name:  "encoding",
+			Value: "base64",
+			Usage: "specify input encoding to parse",
+		},
+	},
+	Action: func(cctx *cli.Context) error {
+		api, closer, err := GetFullNodeAPI(cctx)
+		if err != nil {
+			return err
+		}
+		defer closer()
+		ctx := ReqContext(cctx)
+
+		if cctx.Args().Len() != 3 {
+			return ShowHelp(cctx, fmt.Errorf("incorrect number of arguments"))
+		}
+
+		to, err := address.NewFromString(cctx.Args().First())
+		if err != nil {
+			return xerrors.Errorf("parsing toAddr: %w", err)
+		}
+
+		method, err := strconv.ParseInt(cctx.Args().Get(1), 10, 64)
+		if err != nil {
+			return xerrors.Errorf("parsing method id: %w", err)
+		}
+
+		var params []byte
+		switch cctx.String("encoding") {
+		case "base64":
+			params, err = base64.StdEncoding.DecodeString(cctx.Args().Get(2))
+			if err != nil {
+				return xerrors.Errorf("decoding base64 value: %w", err)
+			}
+		case "hex":
+			params, err = hex.DecodeString(cctx.Args().Get(2))
+			if err != nil {
+				return xerrors.Errorf("decoding hex value: %w", err)
+			}
+		default:
+			return xerrors.Errorf("unrecognized encoding: %s", cctx.String("encoding"))
+		}
+		ts, err := LoadTipSet(ctx, cctx, api)
+		if err != nil {
+			return err
+		}
+
+		act, err := api.StateGetActor(ctx, to, ts.Key())
+		if err != nil {
+			return xerrors.Errorf("getting actor: %w", err)
+		}
+
+		pstr, err := JsonParams(act.Code, abi.MethodNum(method), params)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(pstr)
 
 		return nil
 	},

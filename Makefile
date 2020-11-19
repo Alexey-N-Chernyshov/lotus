@@ -133,17 +133,29 @@ benchmarks:
 
 lotus-pond: 2k
 	go build -o lotus-pond ./lotuspond
-	(cd lotuspond/front && npm i && CI=false npm run build)
 .PHONY: lotus-pond
 BINS+=lotus-pond
+
+lotus-pond-front:
+	(cd lotuspond/front && npm i && CI=false npm run build)
+.PHONY: lotus-pond-front
+
+lotus-pond-app: lotus-pond-front lotus-pond
+.PHONY: lotus-pond-app
 
 lotus-townhall:
 	rm -f lotus-townhall
 	go build -o lotus-townhall ./cmd/lotus-townhall
-	(cd ./cmd/lotus-townhall/townhall && npm i && npm run build)
-	go run github.com/GeertJohan/go.rice/rice append --exec lotus-townhall -i ./cmd/lotus-townhall -i ./build
 .PHONY: lotus-townhall
 BINS+=lotus-townhall
+
+lotus-townhall-front:
+	(cd ./cmd/lotus-townhall/townhall && npm i && npm run build)
+.PHONY: lotus-townhall-front
+
+lotus-townhall-app: lotus-touch lotus-townhall-front
+	go run github.com/GeertJohan/go.rice/rice append --exec lotus-townhall -i ./cmd/lotus-townhall -i ./build
+.PHONY: lotus-townhall-app
 
 lotus-fountain:
 	rm -f lotus-fountain
@@ -167,7 +179,7 @@ BINS+=lotus-bench
 
 lotus-stats:
 	rm -f lotus-stats
-	go build -o lotus-stats ./cmd/lotus-stats
+	go build $(GOFLAGS) -o lotus-stats ./cmd/lotus-stats
 	go run github.com/GeertJohan/go.rice/rice append --exec lotus-stats -i ./build
 .PHONY: lotus-stats
 BINS+=lotus-stats
@@ -292,7 +304,9 @@ method-gen:
 gen: type-gen method-gen
 
 docsgen:
-	go run ./api/docgen > documentation/en/api-methods.md
+	go run ./api/docgen "api/api_full.go" "FullNode" > documentation/en/api-methods.md
+	go run ./api/docgen "api/api_storage.go" "StorageMiner" > documentation/en/api-methods-miner.md
+	go run ./api/docgen "api/api_worker.go" "WorkerAPI" > documentation/en/api-methods-worker.md
 
 print-%:
 	@echo $*=$($*)
