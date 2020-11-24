@@ -259,7 +259,7 @@ type ApplyRet struct {
 
 func (vm *VM) send(ctx context.Context, msg *types.Message, parent *Runtime,
 	gasCharge *GasCharge, start time.Time) ([]byte, aerrors.ActorError, *Runtime) {
-	dvm.OnSend(msg.Method, msg.Nonce, &msg.Value, &msg.To, msg.Params)
+	dvm.OnSend(msg.Method, msg.Nonce, &msg.Value, &msg.To, &msg.From, msg.Params)
 	defer dvm.UnIndent(dvm.Indent())
 
 	defer atomic.AddUint64(&StatSends, 1)

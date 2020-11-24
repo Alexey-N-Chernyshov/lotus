@@ -84,8 +84,8 @@ func Addr(a *address.Address) string {
 	return s
 }
 
-func OnSend(method abi.MethodNum, nonce uint64, value *abi.TokenAmount, to *address.Address, params []byte) {
-	Logf("SEND m=%d n=%d v=%s to=%s %s", method, nonce, value, Addr(to), DumpCbor(params))
+func OnSend(method abi.MethodNum, nonce uint64, value *abi.TokenAmount, to *address.Address, from *address.Address, params []byte) {
+	Logf("SEND m=%d n=%d v=%s to=%s from=%s %s", method, nonce, value, Addr(to), Addr(from), DumpCbor(params))
 }
 
 func OnReceipt(exit exitcode.ExitCode, gas int64, ret []byte) {
